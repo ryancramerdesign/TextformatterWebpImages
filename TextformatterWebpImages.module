@@ -1,0 +1,248 @@
+<?php namespace ProcessWire;
+
+/**
+ * ProcessWire 3.x Textformatter Webp Images 
+ * 
+ * Module that automatically creates WEBP images from references to JPG or PNG images
+ * in textarea fields. It also updates the URLs so that it points to the WEBP images. 
+ * 
+ * Requires ProcessWire 3.0.132 or newer
+ * 
+ * Copyright 2019 by Ryan Cramer 
+ * MPL 2.0
+ * 
+ */
+class TextformatterWebpImages extends Textformatter implements Module {
+	
+	public static function getModuleInfo() {
+		return array(
+			'title' => 'Convert JPG/PNG images to WEBP', 
+			'version' => 1, 
+			'summary' => 'Convert JPG/PNG img tags to use WEBP, auto-creating WEBP images as needed.', 
+			'requires' => 'ProcessWire>=3.0.132',
+			); 
+	}
+
+	/**
+	 * Root URL for file assets
+	 * 
+	 * @var string
+	 * 
+	 */
+	protected $filesUrl = '';
+
+	/**
+	 * Root path for file assets
+	 * 
+	 * @var string
+	 * 
+	 */
+	protected $filesPath = '';
+
+	/**
+	 * Image fields indexed by page ID (reset on every call to formatValue that changes the page ID)
+	 * 
+	 * @var array
+	 * 
+	 */
+	protected $imageFields = array();
+
+	/**
+	 * Cache of replace URLs indexed by page ID (reset on every call to formatValue that changes the page ID)
+	 * 
+	 * @var array
+	 * 
+	 */
+	protected $replacements = array();
+
+	/**
+	 * Last page ID that called this module
+	 * 
+	 * @var int
+	 * 
+	 */
+	protected $lastPageID = 0;
+	
+	/**
+	 * Module init
+	 * 
+	 */
+	public function init() {
+		$config = $this->wire('config');
+		$this->filesUrl = $config->urls('files');
+		$this->filesPath = $config->paths('files');
+		parent::init();
+	}
+
+	/**
+	 * Get all populated image field values for the given $page
+	 * 
+	 * @param Page $page
+	 * @return Pageimages[] Returns array of Pageimages objects indexed by field name
+	 * 
+	 */
+	protected function getImageFields(Page $page) {
+		
+		if(isset($this->imageFields[$page->id])) {
+			return $this->imageFields[$page->id];
+		}
+		
+		$imageFields = array();
+		
+		foreach($page->template->fieldgroup as $field) {
+			if(!$field->type instanceof FieldtypeImage) continue;
+			$value = $page->get($field->name);
+			if(empty($value)) continue;
+			if($value instanceof Pageimage) $value = $value->pagefiles;
+			if(!$value instanceof Pageimages) continue;
+			if(!$value->count()) continue;
+			$imageFields[$field->name] = $value;
+		}
+		
+		$this->imageFields[$page->id] = $imageFields;
+		
+		return $imageFields;
+	}
+
+	/**
+	 * Identify the page from the given file URL
+	 * 
+	 * @param Page $page
+	 * @param string $fileUrl
+	 * @return Page|NullPage
+	 * 
+	 */
+	protected function getPageFromFileUrl(Page $page, $fileUrl) {
+		// determine page id that owns file from its URL
+		$id = str_replace($this->filesUrl, '', dirname($fileUrl));
+
+		// if extended paths are in use, remove slashes
+		if(strpos($id, '/') !== false) $id = str_replace('/', '', $id);
+
+		// get page from id (likely same as $page, but we fall back if not)
+		$id = (int) $id;
+		if($id === $page->id) {
+			$p = $page;
+		} else {
+			$p = $this->wire('pages')->get($id);
+		}
+		
+		return $p;
+	}
+
+	/**
+	 * Given a jpg/png file URL from the $page, return the webp URL for it
+	 * 
+	 * @param Page $page
+	 * @param string $fileUrl
+	 * @return string
+	 * 
+	 */
+	protected function getWebpUrlFromFileUrl(Page $page, $fileUrl) {
+		
+		$filename = basename($fileUrl);
+		$filenameNoExt = pathinfo($filename, PATHINFO_FILENAME);
+		$filesPath = $page->filesManager()->path; 
+		$filesUrl = $page->filesManager()->url;
+		$webpUrl = '';
+		
+		// find the image on one of the page’s images fields
+		foreach($this->getImageFields($page) as $images) {
+
+			$image = $images->getFile($filename);
+			if(!$image) continue;
+
+			// determine if webp file exists and create it if not
+			$webpName = "$filenameNoExt.webp"; // i.e. file.webp
+			$webpName2 = "$filename.webp"; // i.e. file.jpg.webp
+
+			if(file_exists($filesPath . $webpName)) {
+				// webp already exists as file.webp
+				$webpUrl = $filesUrl . $webpName;
+				
+			} else if(file_exists($filesPath . $webpName2)) {
+				// webp already exists as file.ext.webp
+				$webpUrl = $filesUrl . $webpName2;
+
+			} else if($image->name === $filename) {
+				// need to create webp for $image
+				$webpUrl = $image->webp()->url();
+				
+			} else {
+				// need to create webp for variation of $image
+				foreach($image->getVariations() as $variation) {
+					if($variation->name !== $filename) continue;
+					$webpUrl = $variation->webp()->url();
+					break;
+				}
+			}
+
+			break;
+		}
+		
+		return $webpUrl;
+	}
+
+	/**
+	 * Format the given $value for the given $page $field
+	 * 
+	 * @param Page $page
+	 * @param Field $field
+	 * @param string $value
+	 * 
+	 */
+	public function formatValue(Page $page, Field $field, &$value) {
+
+		if(!$this->filesUrl) $this->init();
+		
+		if($this->lastPageID != $page->id && count($this->imageFields) > 2) {
+			$this->imageFields = array();
+			$this->replacements = array();
+		}
+		
+		$imageExts = array('jpeg', 'jpg', 'png');
+		$this->lastPageID = $page->id;
+		$cacheKey = "$field.$page";
+		
+		if(isset($this->replacements[$cacheKey])) {
+			
+			$replacements = $this->replacements[$cacheKey];
+			
+		} else {
+			
+			$replacements = array();
+
+			// do any image references with this ext appear in value?
+			foreach($imageExts as $key => $ext) {
+				if(strpos($value, ".$ext") === false) unset($imageExts[$key]);
+			}
+
+			// if no apparent images in this text, exit now
+			if(!count($imageExts)) return;
+
+			// find all images referenced in attributes
+			$regex = '!=["\'](' . $this->filesUrl . '[^"\'\s]+\.(' . implode('|', $imageExts) . '))[\s"\'?#]!i';
+			if(!preg_match_all($regex, $value, $matches)) return;
+
+			foreach($matches[0] as $key => $fullMatch) {
+
+				$matchUrl = $matches[1][$key];
+
+				// if image exists somewhere outside our files, skip it
+				if(strpos($matchUrl, $this->filesUrl) !== 0) continue;
+				$p = $this->getPageFromFileUrl($page, $matchUrl);
+				if(!$p->id) continue;
+
+				$webpUrl = $this->getWebpUrlFromFileUrl($p, $matchUrl);
+				if($webpUrl) $replacements[$matchUrl] = $webpUrl;
+			}
+			
+			$this->replacements[$cacheKey] = $replacements;
+		}
+
+		if(count($replacements)) {
+			$value = str_replace(array_keys($replacements), array_values($replacements), $value);
+		}
+	}
+
+}
