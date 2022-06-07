@@ -8,19 +8,21 @@
  * 
  * Requires ProcessWire 3.0.132 or newer
  * 
- * Copyright 2019 by Ryan Cramer 
+ * Copyright 2019-2022 by Ryan Cramer 
  * MPL 2.0
  * 
+ * @property string $matchAttrs space-separated string of attributes to match, i.e. "src srcset href" or blank for any
+ * 
  */
-class TextformatterWebpImages extends Textformatter implements Module {
+class TextformatterWebpImages extends Textformatter implements Module, ConfigurableModule {
 	
 	public static function getModuleInfo() {
 		return array(
 			'title' => 'Convert JPG/PNG images to WEBP', 
-			'version' => 1, 
+			'version' => 2, 
 			'summary' => 'Convert JPG/PNG img tags to use WEBP, auto-creating WEBP images as needed.', 
 			'requires' => 'ProcessWire>=3.0.132',
-			); 
+		); 
 	}
 
 	/**
@@ -62,6 +64,11 @@ class TextformatterWebpImages extends Textformatter implements Module {
 	 * 
 	 */
 	protected $lastPageID = 0;
+	
+	public function __construct() {
+		$this->set('matchAttrs', '');
+		parent::__construct();
+	}
 	
 	/**
 	 * Module init
@@ -124,7 +131,7 @@ class TextformatterWebpImages extends Textformatter implements Module {
 		if($id === $page->id) {
 			$p = $page;
 		} else {
-			$p = $this->wire('pages')->get($id);
+			$p = $this->wire()->pages->get($id);
 		}
 		
 		return $p;
@@ -180,6 +187,8 @@ class TextformatterWebpImages extends Textformatter implements Module {
 			break;
 		}
 		
+		$webpUrl = str_replace('.webp.webp', '.webp', $webpUrl);
+		
 		return $webpUrl;
 	}
 
@@ -201,8 +210,16 @@ class TextformatterWebpImages extends Textformatter implements Module {
 		}
 		
 		$imageExts = array('jpeg', 'jpg', 'png');
+		$matchAttrs = array();
 		$this->lastPageID = $page->id;
 		$cacheKey = "$field.$page";
+	
+		if($this->matchAttrs) {
+			foreach(explode(' ', $this->matchAttrs) as $attr) {
+				$attr = strtolower(trim($attr));
+				if(!empty($attr)) $matchAttrs[$attr] = $attr;
+			}
+		}
 		
 		if(isset($this->replacements[$cacheKey])) {
 			
@@ -221,7 +238,8 @@ class TextformatterWebpImages extends Textformatter implements Module {
 			if(!count($imageExts)) return;
 
 			// find all images referenced in attributes
-			$regex = '!=["\'](' . $this->filesUrl . '[^"\'\s]+\.(' . implode('|', $imageExts) . '))[\s"\'?#]!i';
+			$attrs = (count($matchAttrs) ? '\b(?:' . implode('|', $matchAttrs) . ')' : '');
+			$regex = '!' . $attrs . '=["\'](' . $this->filesUrl . '[^"\'\s]+\.(' . implode('|', $imageExts) . '))[\s"\'?#]!i';
 			if(!preg_match_all($regex, $value, $matches)) return;
 
 			foreach($matches[0] as $key => $fullMatch) {
@@ -245,4 +263,16 @@ class TextformatterWebpImages extends Textformatter implements Module {
 		}
 	}
 
+	public function getModuleConfigInputfields(InputfieldWrapper $inputfields) {
+		/** @var InputfieldText $f */
+		$f = $this->wire()->modules->get('InputfieldText');
+		$f->attr('name', 'matchAttrs'); 
+		$f->label = $this->_('Attributes to match'); 
+		$f->description = $this->_('Enter a space-separated string of attributes to match or leave blank to match any attributes that images appear in.'); 
+		$f->notes = $this->_('Example: `src data-src href`'); 
+		$f->val($this->matchAttrs);
+		$f->collapsed = Inputfield::collapsedBlank;
+		$f->icon = 'image';
+		$inputfields->add($f);
+	}
 }
